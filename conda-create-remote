@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+_version="0.0.9000"
+_me=$(basename "${0}")
+
+help() {
+cat << EOF
+usage: ${_me} [-u|--user <USER>] [-r|--repo <REPO>] [-f|--file <PATH>] (-b|--branch <BRANCH> | -t|--tag <TAG>) (-n|--name <NAME> | -p|--prefix) [optional]
+
+required:
+  -u|--user <USER>      The GitHub user that owns the repo.
+  -r|--repo <REPO>      The repo where the file is located.
+  -f|--file <PATH>      The path to the file in the repo.
+  -b|--branch <BRANCH>  Specify a branch to pull from (default: main).
+  -t|--tag <TAG>        Specify a tag to pull from.
+  -n|--name <NAME>      Name of environment.
+  -p|--prefix <PATH>    Full path to environment location (i.e. prefix).
+optional:
+  -h|--help             Print this help message.
+  --backend <SOLVER>    Choose which solver backend to use (one of [conda|mamba]; default: conda).
+  -d|--dry-run          Only display what would have been done.
+  -q|--quiet            Do not display progress bar.
+  -v|--verbose          Print TRACE.
+  -y|--yes              Sets any confirmation values to 'yes' automatically. Users will not be asked to confirm any adding, deleting, backups, etc.
+
+examples:
+  # create an environment from the example file:
+  ${_me} -r leightonpayne/conda-create-remote/.test/environment.yml
+  # create an environment from the example file, assign a new name, and use mamba as the solver:
+  ${_me} -r leightonpayne/conda-create-remote/.test/environment.yml -n test-env --backend mamba
+EOF
+}
+
+version() { printf "%s v%s" "${_me}" "${_version}"; }
+
+die() { printf "\nERROR: \t %s\n" "$@" >&2 ; exit 1; }
+
+# debug <message>; Print message when using debug.
+verbose() {
+  if [ "${_verbose:-""}" != "" ] ; then
+    printf "$(date "+[%H:%M:%S]") DEBUG >> ${@}"
+  fi
+}
+
+require() {
+  local _option="${1:-}"
+  local argument="${2:-}"
+  if [[ -z "${argument}" ]] || [[ "${argument}" =~ ^- ]]; then
+    die "Option [${_option}] requires an argument"
+  fi
+}
+
+_gh_prefix="https://raw.github.com"
+_user=""
+_repo=""
+_file=""
+_branch=""
+_tag=""
+_name=""
+_prefix=""
+_backend="conda"
+_dry_run=""
+_quiet=""
+_verbose=""
+_yes=""
+
+if [ ${#} = 0 ]; then help; exit 0; fi
+
+while [[ "${#}" -gt 0 ]]; do
+  _opt="${1:-}"
+  _par="${2:-}"
+  case "${_opt}" in
+    -h|--help) help; exit 0 ;;
+    -v|--version) version; exit 0 ;;
+    -u|--user) require "${_opt}" "${_par}"; _user="${_par}"; shift ;;
+    -r|--repo) require "${_opt}" "${_par}"; _repo="${_par}"; shift ;;
+    -f|--file) require "${_opt}" "${_par}"; _file="${_par}"; shift ;;
+    -b|--branch) require "${_opt}" "${_par}"; _branch="${_par}"; shift ;;
+    -t|--tag) require "${_opt}" "${_par}"; _tag="${_par}"; shift ;;
+    -n|--name) require "${_opt}" "${_par}"; _name="--name ${_par} "; shift ;;
+    -p|--prefix) require "${_opt}" "${_par}"; _prefix="--prefix ${_par} "; shift ;;
+    --backend) require "${_opt}" "${_par}"; _backend="${_par}"; shift ;;
+    -d|--dry-run) _dry_run="--dry-run " ;;
+    -q|--quiet) _quiet="--quiet " ;;
+    --verbose) _verbose="--verbose " ;;
+    -y|--yes) _yes="--yes " ;;
+    --end_opts) break ;;
+    *) die "Unexpected option: [${_opt}]" ;;
+  esac
+  shift
+done
+
+if [ "${_user}" == "" ]; then die "[-u|--user] is required"; fi
+if [ "${_repo}" == "" ]; then die "[-r|--repo] is required"; fi
+if [ "${_file}" == "" ]; then die "[-n|--file] is required"; fi
+
+if [ "${_name}" == "" ] && [ "${_prefix}" == "" ]; then
+  die "One of [-n|--name] or [-p|--prefix] is required"
+elif [ "${_name}" != "" ] && [ "${_prefix}" != "" ]; then
+  die "Only one of [-n|--name] or [-p|--prefix] should be specified"
+fi
+
+if [ "${_tag}" == "" ] && [ "${_branch}" == "" ]; then
+  verbose "Defaulting to [--branch main]"
+  _branch="main"
+elif [ "${_tag}" != "" ] && [ "${_branch}" != "" ]; then
+  die "Only one of [-b|--branch] or [-t|--tag] should be specified"
+fi
+
+_params="${_name}${_prefix}${_dry_run}${_quiet}${_verbose}${_yes}"
+
+# Create temporary file and clean on trap.
+_tmpfile=$(mktemp /tmp/ccr.XXXXXXXX.yml)
+trap "rm -f ${_tmpfile}" ERR INT EXIT
+
+# Download the remote file.
+_link="${_gh_prefix}/${_user}/${_repo}/${_tag}${_branch}/${_file}"
+if ! curl -Lsf "${_link}" -o "${_tmpfile}"; then die "File at ${_link} not found"; fi
+verbose "FILE DOWNLOADED: ${_link}"
+_def=$(cat "${_tmpfile}")
+verbose "START DEFINITION\n\n${_def}\n\n"
+verbose "END DEFINITION\n\n"
+
+_execute="${_backend} env create --file ${_tmpfile} ${_params}"
+verbose "RUNNING: ${_execute}\n"
+eval "${_execute}"
